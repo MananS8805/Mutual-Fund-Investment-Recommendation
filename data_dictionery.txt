@@ -1,0 +1,21 @@
+Field	Type	Input Type	Example Values	Scheme Matching	Vector Score
+user_id	str	Auto	user_001	Primary Key	-
+age	int	Slider (18-70)	25, 35, 55	Risk Capacity
+Young→Higher Equity
+50+→Debt Focus	age_norm = age/70
+annual_income	str	Dropdown	5L, 10L, 25L, 50L+	SIP Scale
+Min SIP filter
+AUM preference	income_score = 1-4
+monthly_sip	int	Number (500-50K)	5000, 10000, 25000	Liquidity Filter
+minsipamount ≤ sip	sip_norm = sip/50000
+risk_tolerance	str	Radio	Low, Moderate, High, Very High	Core Matching
+Low→Debt
+High→Equity	risk_score = 1-5
+investment_horizon	str	Dropdown	1-3yr, 3-5yr, 5-10yr, 10+yr	Return Weight
+Short→Debt returns
+Long→Equity 5yr	horizon_norm = 1-4
+investment_goal	str	Multi-select	Retirement, Child Edu, Wealth Growth, Emergency	Category Bias
+Retirement→Equity+Debt
+Emergency→Liquid	goal_vector = [0,1,0]
+experience	str	Checkbox	Beginner, Intermediate, Expert	Complexity Filter
+Beginner→Index/Large Cap	exp_score = 1-3
