@@ -9,7 +9,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from recommendation_model import RecommendationEngine, UserProfile
+from recommendation_model import FundRecommender, UserProfile
 import json
 
 
@@ -20,7 +20,7 @@ def test_single_recommendation():
     print("="*80)
     
     try:
-        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        engine = FundRecommender("data/mf_full_dataset_final.csv")
         
         # Create a young investor with high risk tolerance
         profile = UserProfile(
@@ -39,10 +39,13 @@ def test_single_recommendation():
         print(f"\n✅ Generated {len(recommendations)} recommendations\n")
         
         for rec in recommendations:
+            asset_class = rec.get('asset_class', 'Unknown')
             print(f"  #{rec['rank']} - {rec['scheme_name']}")
-            print(f"      Fund House: {rec['fund_house']}")
-            print(f"      Match Score: {rec['match_score']} | TER: {rec['estimated_ter']}%")
-            print(f"      3Y CAGR: {rec['cagr_3y']}% | AUM: ₹{rec['aum_cr']}Cr")
+            print(f"      Asset Class: {asset_class} | Fund House: {rec['fund_house']}")
+            print(f"      Score: {rec.get('score', rec.get('match_score', 'N/A')):.2f} | TER: {rec['estimated_ter']:.2f}%")
+            cagr = rec.get('cagr_3y', 0)
+            cagr_str = f"{cagr*100:.2f}%" if cagr and isinstance(cagr, (int, float)) else "N/A"
+            print(f"      3Y CAGR: {cagr_str} | AUM: ₹{rec['aum_cr']:,.0f}Cr")
             print(f"      Reason: {rec['reason']}\n")
         
         return True
@@ -55,11 +58,11 @@ def test_single_recommendation():
 def test_multiple_profiles():
     """Test multiple user profiles"""
     print("\n" + "="*80)
-    print("TEST 2: Multiple User Profiles")
+    print("TEST 2: Multiple User Profiles (Validation of Bug Fixes)")
     print("="*80)
     
     try:
-        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        engine = FundRecommender("data/mf_full_dataset_final.csv")
         
         profiles = [
             UserProfile(
@@ -85,11 +88,18 @@ def test_multiple_profiles():
         ]
         
         for profile in profiles:
-            print(f"\n👤 Profile: {profile.user_id} (Age {profile.age}, Risk: {profile.risk_tolerance})")
+            print(f"\n👤 Profile: {profile.user_id}")
+            print(f"   Age {profile.age}, Risk: {profile.risk_tolerance}, Horizon: {profile.investment_horizon}")
             recs = engine.recommend(profile, top_n=3)
             
+            if len(recs) == 0:
+                print(f"   ⚠️  No matching funds (horizon constraint enforcement)")
+                continue
+                
             for rec in recs:
-                print(f"   #{rec['rank']} {rec['scheme_code']} - Match: {rec['match_score']}")
+                asset_class = rec.get('asset_class', 'N/A')
+                score = rec.get('score', rec.get('match_score', 'N/A'))
+                print(f"   #{rec['rank']} [{asset_class}] {rec['scheme_code']} - {rec['scheme_name'][:50]} (Score: {score})")
         
         print("\n✅ Multiple profiles test passed")
         return True
@@ -100,13 +110,13 @@ def test_multiple_profiles():
 
 
 def test_data_integrity():
-    """Test dataset integrity"""
+    """Test dataset integrity and classification"""
     print("\n" + "="*80)
-    print("TEST 3: Data Integrity Check")
+    print("TEST 3: Data Integrity & Classification Check")
     print("="*80)
     
     try:
-        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        engine = FundRecommender("data/mf_full_dataset_final.csv")
         df = engine.df_schemes
         
         print(f"\n✅ Dataset Integrity:")
@@ -119,6 +129,13 @@ def test_data_integrity():
         print(f"   Avg TER: {df['estimated_ter'].mean():.3f}%")
         print(f"   Median AUM: ₹{df['aum_cr'].median():.0f}Cr")
         
+        if 'Asset_Class' in df.columns:
+            print(f"\n✅ Asset Classification:")
+            print(f"   Equity funds: {(df['Asset_Class'] == 'Equity').sum():,}")
+            print(f"   Debt funds: {(df['Asset_Class'] == 'Debt').sum():,}")
+            print(f"   Hybrid funds: {(df['Asset_Class'] == 'Hybrid').sum():,}")
+            print(f"   Other: {(df['Asset_Class'] == 'Other').sum():,}")
+        
         return True
     
     except Exception as e:
@@ -129,11 +146,11 @@ def test_data_integrity():
 def test_edge_cases():
     """Test edge cases and boundary conditions"""
     print("\n" + "="*80)
-    print("TEST 4: Edge Cases")
+    print("TEST 4: Edge Cases & Constraint Enforcement")
     print("="*80)
     
     try:
-        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        engine = FundRecommender("data/mf_full_dataset_final.csv")
         
         # Test 1: Very low SIP
         profile1 = UserProfile(
@@ -163,10 +180,10 @@ def test_edge_cases():
         recs2 = engine.recommend(profile2, top_n=3)
         print(f"✓ High SIP case: Generated {len(recs2)} recommendations")
         
-        # Test 3: Senior citizen
+        # Test 3: Senior citizen with emergency fund
         profile3 = UserProfile(
             user_id="senior",
-            age=70,  # Maximum age
+            age=70,
             annual_income="10L",
             monthly_sip=5000,
             risk_tolerance="Low",
@@ -175,7 +192,7 @@ def test_edge_cases():
             experience="Intermediate"
         )
         recs3 = engine.recommend(profile3, top_n=3)
-        print(f"✓ Senior citizen case: Generated {len(recs3)} recommendations")
+        print(f"✓ Senior citizen (Emergency) case: Generated {len(recs3)} recommendations")
         
         print("\n✅ All edge cases passed")
         return True
@@ -188,11 +205,11 @@ def test_edge_cases():
 def test_top_10_multiple_profiles():
     """Test top 10 recommendations for 10+ diverse user profiles"""
     print("\n" + "="*80)
-    print("TEST 5: Top 10 Recommendations for Multiple Profiles")
+    print("TEST 5: Top Recommendations with Asset Class Validation")
     print("="*80)
     
     try:
-        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        engine = FundRecommender("data/mf_full_dataset_final.csv")
         
         # Define 12 diverse user profiles
         profiles = [
@@ -339,10 +356,15 @@ def test_top_10_multiple_profiles():
             print(f"\n   📊 Top {len(recommendations)} Recommendations:\n")
             
             for rec in recommendations:
-                print(f"   #{rec['rank']:2d} | {rec['scheme_name'][:60]}")
+                asset_class = rec.get('asset_class', 'N/A')
+                score = rec.get('score', rec.get('match_score', 'N/A'))
+                cagr = rec.get('cagr_3y', 0)
+                cagr_str = f"{cagr*100:.2f}%" if cagr and isinstance(cagr, (int, float)) else "N/A"
+                
+                print(f"   #{rec['rank']:2d} [{asset_class:6s}] | {rec['scheme_name'][:50]}")
                 print(f"       Fund House: {rec['fund_house']}")
-                print(f"       Match Score: {rec['match_score']}% | TER: {rec['estimated_ter']}%")
-                print(f"       3Y CAGR: {rec['cagr_3y']*100:.2f}% | AUM: ₹{rec['aum_cr']:,.0f}Cr")
+                print(f"       Score: {score} | TER: {rec['estimated_ter']:.2f}%")
+                print(f"       3Y CAGR: {cagr_str} | AUM: ₹{rec['aum_cr']:,.0f}Cr")
                 print(f"       Reason: {rec['reason']}\n")
             
             results_summary.append((profile.user_id, len(recommendations)))
@@ -377,11 +399,11 @@ def main():
     
     results = []
     
-    results.append(("Data Integrity", test_data_integrity()))
+    results.append(("Data Integrity & Classification", test_data_integrity()))
     results.append(("Single Recommendation", test_single_recommendation()))
     results.append(("Multiple Profiles", test_multiple_profiles()))
-    results.append(("Edge Cases", test_edge_cases()))
-    results.append(("Top 10 Multiple Profiles", test_top_10_multiple_profiles()))
+    results.append(("Edge Cases & Constraints", test_edge_cases()))
+    results.append(("Top Recommendations (12 Profiles)", test_top_10_multiple_profiles()))
     
     # Summary
     print("\n" + "="*80)

@@ -1,6 +1,7 @@
 """
 Mutual Fund Recommendation Engine
-Matches investor profiles to optimal schemes using vector-based similarity
+Matches investor profiles to optimal schemes using vector-based similarity and
+separate ranking of Equity/Debt buckets to prevent recommendation bias.
 """
 
 import pandas as pd
@@ -25,18 +26,26 @@ class UserProfile:
     experience: str  # 'Beginner', 'Intermediate', 'Expert'
 
 
-class RecommendationEngine:
-    """Vectorizes user profiles and schemes, computes similarity matches"""
+class FundRecommender:
+    """
+    Fixed Mutual Fund Recommender with separate Equity/Debt ranking.
+    
+    Implements three-stage pipeline:
+    1. CLASSIFICATION: Bucket schemes into Asset Classes
+    2. FILTERING: Apply hard horizon/goal/experience constraints
+    3. RANKING: Score and rank WITHIN each asset class separately
+    """
     
     def __init__(self, dataset_path: str = "data/mf_full_dataset_final.csv"):
         """
-        Initialize engine with mutual fund dataset
+        Initialize with mutual fund dataset and classify funds.
         
         Args:
-            dataset_path: Path to the final MF dataset with features
+            dataset_path: Path to the final MF dataset
         """
         self.df_schemes = pd.read_csv(dataset_path)
         self._validate_dataset()
+        self._classify_funds()  # Must run after validation
         
     def _validate_dataset(self):
         """Ensure required columns exist and add missing features"""
@@ -107,56 +116,125 @@ class RecommendationEngine:
         self.df_schemes['estimated_ter'] = self.df_schemes['estimated_ter'].fillna(1.0)
         self.df_schemes['nav'] = self.df_schemes['nav'].fillna(100.0)
         
-        print(f"✅ Loaded {len(self.df_schemes):,} schemes with complete features")
+        print(f"[OK] Loaded {len(self.df_schemes):,} schemes with complete features")
 
     def _classify_funds(self):
-        """Classify funds into Asset_Class and Risk Grade per strict mapping.
-
-        Asset mapping:
-          Equity: Large Cap, Mid Cap, Small Cap, Flexi Cap, Sectoral, Index
-          Debt: Liquid, Overnight, Corporate Bond, Ultra Short, Gilt
-          Hybrid: Arbitrage, Dynamic Bond, Aggressive Hybrid
-
-        Risk grade: 1 (lowest) to 5 (highest) for filtering rules.
         """
-        df = self.df_schemes
+        STAGE 1: CLASSIFICATION
+        Bucket schemes into Asset Classes and Risk Grades per strict SEBI categories.
+        
+        FIX FOR "DEBT DISGUISED AS EQUITY" BUG:
+        - PRIORITY 1: Check DEBT keywords FIRST (must catch "Bond Index", "SDL", "Target Maturity")
+        - PRIORITY 2: Check HYBRID keywords
+        - PRIORITY 3: Check EQUITY keywords (Index is only safe to check here)
+        - Default: Other
+        
+        Asset_Class mapping:
+          - Debt: Liquid, Overnight, Corporate Bond, Ultra Short, Gilt, Bond Index, SDL, Target Maturity,
+                  Money Market, Floater, Credit Risk, Banking, PSU
+          - Hybrid: Arbitrage, Dynamic Bond, Aggressive Hybrid
+          - Equity: Large Cap, Mid Cap, Small Cap, Flexi Cap, Sectoral, Index (only if NOT Debt)
+        
+        Risk_Grade (1-5): Used for filtering constraints
+          1 = Lowest (Liquid, Overnight)
+          2 = Low (Ultra Short, Money Market)
+          3 = Medium (Large Cap, Flexi, Hybrid, Dynamic)
+          4 = High (Mid Cap, Small Cap)
+          5 = Highest (Sectoral, Thematic)
+        """
+        df = self.df_schemes.copy()
 
-        def map_asset(cat: str) -> str:
-            if pd.isna(cat):
+        def _classify_row(row) -> str:
+            """
+            Classify fund into Asset_Class using name + category (strict priority order).
+            Returns: 'Equity', 'Debt', 'Hybrid', or 'Other'
+            
+            Priority order:
+            1. EXCLUSIONS: Commodities and other non-financial assets
+            2. DEBT: Bond funds, govt securities, money market
+            3. HYBRID: Balanced, arbitrage funds
+            4. EQUITY: Stock-based funds
+            5. DEFAULT: Other
+            """
+            name = str(row.get('scheme_name', '')).lower()
+            category = str(row.get('scheme_category', '')).lower()
+            combined = f"{name} {category}"
+            
+            # STEP 0: EXCLUSIONS (Non-financial assets)
+            # FIX: Filter out commodities that masquerade as equity
+            exclusion_keywords = ['gold', 'silver', 'commodity', 'real estate', 'reits']
+            if any(k in combined for k in exclusion_keywords):
                 return 'Other'
-            c = cat.lower()
-            # Equity keywords
-            if any(k in c for k in ['large cap', 'large', 'mid cap', 'mid', 'small cap', 'small', 'flexi', 'sectoral', 'index']):
-                return 'Equity'
-            # Debt keywords
-            if any(k in c for k in ['liquid', 'overnight', 'corporate bond', 'ultra short', 'gilt']):
+            
+            # STEP A: DEBT KEYWORDS FIRST (check NAME for critical indicators, then combined)
+            # FIX: Add 'bharat bond' to catch Debt FoF; check name first for specificity
+            if any(k in name for k in ['bond', 'sdl', 'g-sec', 'g-security', 'bharat bond']):
                 return 'Debt'
-            # Hybrid keywords
-            if any(k in c for k in ['arbitrage', 'dynamic bond', 'aggressive hybrid', 'hybrid']):
+            
+            # Comprehensive debt keyword list (category-based fallback)
+            debt_keywords = [
+                'liquid', 'overnight', 'corporate bond', 'ultra short', 'gilt',
+                'bond index',  # FIX: Catch "Edelweiss NIFTY PSU Bond Plus SDL Index"
+                'bond plus',   # Handles "PSU Bond Plus" patterns
+                'sdl',         # Sovereign Development Loan
+                'target maturity',
+                'money market',
+                'floater',
+                'credit risk',
+                'banking',
+                'psu bond',    # PSU-specific bonds
+                'short duration',  # Short duration funds are debt
+                'bharat bond',  # FIX: FOF based on Bharat Bond bonds
+                'fof',         # Fund of Funds (often debt-based)
+            ]
+            if any(k in combined for k in debt_keywords):
+                return 'Debt'
+            
+            # STEP B: HYBRID KEYWORDS
+            hybrid_keywords = ['arbitrage', 'dynamic bond', 'hybrid', 'balanced']
+            if any(k in combined for k in hybrid_keywords):
                 return 'Hybrid'
+            
+            # STEP C: EQUITY KEYWORDS (NOW safe to check 'Index')
+            equity_keywords = [
+                'large cap', 'mid cap', 'small cap', 'flexi', 'flexi cap',
+                'sectoral', 'thematic', 'index',
+                'growth', 'dividend',
+                'multi-cap', 'multicap'
+            ]
+            if any(k in combined for k in equity_keywords):
+                return 'Equity'
+            
+            # STEP D: DEFAULT
             return 'Other'
 
-        def map_risk(cat: str) -> int:
-            if pd.isna(cat):
+        def _risk_grade(category: str) -> int:
+            """Assign risk grade 1-5 for filtering."""
+            if pd.isna(category):
                 return 3
-            c = cat.lower()
+            c = str(category).lower()
+            
             if any(k in c for k in ['liquid', 'overnight']):
-                return 1
-            if any(k in c for k in ['ultra short', 'short']):
-                return 2
-            if any(k in c for k in ['large', 'large cap', 'flexi', 'hybrid', 'dynamic']):
-                return 3
-            if any(k in c for k in ['mid', 'mid cap', 'small', 'small cap']):
-                return 4
+                return 1  # Safest
+            if any(k in c for k in ['ultra short', 'short duration', 'money market']):
+                return 2  # Low risk
+            if any(k in c for k in ['large cap', 'flexi', 'hybrid', 'dynamic', 'bond']):
+                return 3  # Medium
+            if any(k in c for k in ['mid cap', 'small cap']):
+                return 4  # Higher
             if any(k in c for k in ['sectoral', 'thematic']):
-                return 5
+                return 5  # Highest
             return 3
 
-        df['Asset_Class'] = df['scheme_category'].astype(str).apply(map_asset)
-        df['Risk_Grade'] = df['scheme_category'].astype(str).apply(map_risk)
-        # ensure min_sip column exists for viability checks
-        if 'min_sip' not in df.columns:
-            df['min_sip'] = 0.0
+        # Apply classification using both scheme_name and scheme_category
+        self.df_schemes['Asset_Class'] = df.apply(_classify_row, axis=1)
+        self.df_schemes['Risk_Grade'] = df['scheme_category'].astype(str).apply(_risk_grade)
+        
+        # Ensure min_sip exists
+        if 'min_sip' not in self.df_schemes.columns:
+            self.df_schemes['min_sip'] = 0.0
+        
+        print(f"[OK] Classification complete: {len(self.df_schemes)} schemes mapped")
     
     def vectorize_user(self, profile: UserProfile) -> Dict[str, float]:
         """
@@ -207,106 +285,163 @@ class RecommendationEngine:
             'goal_score': goal_score
         }
 
-    def _allocate(self, profile: UserProfile, total_amount: Optional[float] = None) -> Dict[str, float]:
-        """Allocation layer: determine % to Equity vs Debt based on age and risk.
-
-        If `total_amount` is None, compute annual commitment as monthly_sip * 12.
-        Returns allocation percents (0-100).
+    def _compute_allocation(self, profile: UserProfile) -> Dict[str, float]:
         """
-        if total_amount is None:
-            total_amount = profile.monthly_sip * 12.0
-
-        # Base formula
-        equity_percent = max(0.0, min(100.0, 110 - profile.age))
-
-        # Risk adjustments per spec
-        rt = profile.risk_tolerance.lower()
-        if 'high' in rt or 'very high' in rt:
-            equity_percent = min(100.0, equity_percent + 10.0)
-        if 'low' in rt:
-            equity_percent = max(0.0, equity_percent - 20.0)
-
-        # Horizon override: if no equity available later, engine will set 0
-
-        debt_percent = 100.0 - equity_percent
-
-        return {'Equity': equity_percent / 100.0, 'Debt': debt_percent / 100.0, 'total_amount': total_amount}
-
-    def _hard_filter(self, profile: UserProfile, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply Hard Filter Layer (Gatekeeper) per blueprint.
-
-        Removes funds incompatible with user's horizon, experience, AUM, and SIP.
+        ALLOCATION STRATEGY
+        Calculate target Equity % based on age, risk tolerance, and horizon.
+        
+        Formula:
+          Base: Target_Equity_Pct = 110 - Age
+          Adjust for Risk: +10% if High/VeryHigh, -20% if Low
+          Override for Horizon: 0% if horizon < 3yr
         """
-        df = df.copy()
+        # Base formula: 110 - Age (range: 40-110% for ages 0-70)
+        target_equity_pct = 110 - profile.age
+        
+        # Risk adjustments
+        risk_tol = str(profile.risk_tolerance).lower()
+        if 'high' in risk_tol or 'very high' in risk_tol:
+            target_equity_pct += 10.0
+        elif 'low' in risk_tol:
+            target_equity_pct -= 20.0
+        
+        # Horizon override: short horizons must have 0% equity
+        horizon = str(profile.investment_horizon).lower()
+        if any(x in horizon for x in ['<1', 'less', '1yr', '1-3', '3yr-5yr']):
+            # For Emergency/1-3yr, force 0% equity
+            if 'emergency' in [g.lower() for g in profile.investment_goals]:
+                target_equity_pct = 0.0
+            elif any(x in horizon for x in ['<1', 'less', '1yr', '1-3']):
+                target_equity_pct = 0.0
+        
+        # Clamp to [0, 100]
+        target_equity_pct = max(0.0, min(100.0, target_equity_pct))
+        
+        return {
+            'equity_pct': target_equity_pct / 100.0,
+            'debt_pct': (100.0 - target_equity_pct) / 100.0
+        }
 
-        # Constraint A: Investment Horizon (strict rules)
-        horizon = profile.investment_horizon
-        h = str(horizon).lower()
-        # safe lowercase scheme_category for string ops
+    def _hard_filter(self, profile: UserProfile) -> pd.DataFrame:
+        """
+        STAGE 2: FILTERING (Gatekeeper Layer)
+        Apply strict constraints based on horizon, goals, and experience.
+        
+        Returns only schemes that are SAFE for the investor's profile.
+        """
+        df = self.df_schemes.copy()
         cat_lower = df['scheme_category'].fillna('').str.lower()
-        if '<1' in h or 'less' in h or h.startswith('1yr') or h.startswith('<1'):
-            # Keep ONLY Liquid/Overnight (Asset_Class == Debt and Risk_Grade==1)
+        
+        # --- HORIZON CONSTRAINTS (Strict) ---
+        horizon = str(profile.investment_horizon).lower()
+        
+        if 'emergency' in profile.investment_goals:
+            # Rule: Emergency goals → ONLY Liquid/Overnight
             df = df[(df['Asset_Class'] == 'Debt') & (df['Risk_Grade'] == 1)]
-        elif '1-3' in h or '1-3yr' in h:
-            # Keep ONLY Debt and Arbitrage funds. Remove all Equity.
-            df = df[(df['Asset_Class'] == 'Debt') | ((df['Asset_Class'] == 'Hybrid') & cat_lower.str.contains('arbitrage'))]
-            df = df[df['Asset_Class'] != 'Equity']
-        elif '3-5' in h or '3-5yr' in h:
-            # Keep Debt, Hybrid, and Large/Flexi Cap. Remove Mid/Small/Sectoral.
-            df = df[(df['Asset_Class'] == 'Debt') | (df['Asset_Class'] == 'Hybrid') | ((df['Asset_Class'] == 'Equity') & cat_lower.str.contains('large|flexi'))]
+            print(f"🚨 Emergency goal detected: Filtered to {len(df)} Liquid/Overnight funds")
+        
+        elif any(x in horizon for x in ['<1', 'less', '1yr', '1-3']):
+            # Rule: 1-3yr horizon → ONLY Debt and Arbitrage. NO Equity.
+            df = df[
+                (df['Asset_Class'] == 'Debt') |
+                ((df['Asset_Class'] == 'Hybrid') & cat_lower.str.contains('arbitrage', na=False))
+            ]
+            print(f"[FILTER] 1-3yr horizon: Filtered to {len(df)} Debt/Arbitrage funds")
+        
+        elif any(x in horizon for x in ['3-5', '3yr-5yr']):
+            # Rule: 3-5yr horizon → Debt + Hybrid + Large/Flexi Cap. NO Mid/Small/Sectoral.
+            mask_debt = df['Asset_Class'] == 'Debt'
+            mask_hybrid = df['Asset_Class'] == 'Hybrid'
+            mask_large_flexi = (df['Asset_Class'] == 'Equity') & cat_lower.str.contains('large|flexi', na=False)
+            
+            df = df[mask_debt | mask_hybrid | mask_large_flexi]
+            print(f"📊 3-5yr horizon: Filtered to {len(df)} funds (Debt/Hybrid/Large Cap)")
+        
         else:
-            # 5+ years or unknown -> allow all categories
-            pass
-
-        # Constraint B: Experience Level
+            # 5-10yr or 10+yr → Allow all categories
+            print(f"[HORIZON] Long horizon ({horizon}): All categories allowed")
+        
+        # --- EXPERIENCE CONSTRAINTS ---
         if str(profile.experience).lower() == 'beginner':
-            # Remove Sectoral, Thematic, and Small Cap funds
-            df = df[~cat_lower.str.contains('sectoral|thematic|small cap|small')]
-
-        # Constraint C: Viability - AUM check
+            # Rule: Beginners → Remove Sectoral, Thematic, Small Cap
+            df = df[~cat_lower.str.contains('sectoral|thematic|small cap|small', na=False)]
+            print(f"[EXPERIENCE] Beginner investor: Filtered to {len(df)} funds (removed Sectoral/Small Cap)")
+        
+        # --- VIABILITY CONSTRAINTS ---
+        # Minimum AUM: 100 Cr
+        aum_before = len(df)
         df = df[df['aum_cr'] >= 100.0]
-
-        # SIP / Min SIP viability
+        print(f"[AUM] AUM >= 100Cr: {aum_before:,} -> {len(df):,} funds")
+        
+        # Minimum SIP viability
         if 'min_sip' in df.columns and profile.monthly_sip is not None:
             df = df[df['min_sip'] <= profile.monthly_sip]
+        
+        return df.copy()
 
-        return df
-
-    def _score_and_rank(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute P (performance), C (cost), T (trust) and final weighted score.
-
-        P: Sharpe ratio normalized (use `sharpe_1y_annualized` if present, else approximate)
-        C: inverse TER normalized
-        T: log(AUM) normalized
-        Weights: P=0.4, C=0.3, T=0.3
+    def _score_funds_within_class(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        STAGE 3: RANKING (Within Asset Class)
+        Score funds SEPARATELY within their Asset_Class (Equity vs Debt).
+        This prevents lower-cost Debt funds from outranking higher-risk Equity funds.
+        
+        Scoring Formula (for each asset class):
+          Score = (0.4 × Sharpe) + (0.4 × (1/TER)) + (0.2 × Log(AUM))
+        
+        Uses Z-Score normalization within each asset class ONLY.
         """
         df = df.copy()
-
-        # Performance (P) - use sharpe_1y_annualized directly if available
+        
+        # Define scoring components
+        # 1. Sharpe Ratio (if available, else approximate from 3Y CAGR)
         if 'sharpe_1y_annualized' in df.columns:
-            p_raw = df['sharpe_1y_annualized'].fillna(0.0)
+            sharpe = df['sharpe_1y_annualized'].fillna(0.0)
         else:
-            # fallback: use return_score as proxy
-            p_raw = df['return_score'].fillna(0.0)
-
-        # normalize to 0-1
-        p_min, p_max = p_raw.min(), p_raw.max()
-        df['P'] = (p_raw - p_min) / (p_max - p_min + 1e-9) if p_max > p_min else 0.5
-
-        # Cost (C) - lower expense is better -> invert expense_ratio / estimated_ter
+            # Fallback: scale 3Y CAGR to sharpe-like range (divide by volatility proxy)
+            sharpe = df['cagr_3y'].fillna(0.0) / 0.15  # Assume 15% volatility
+        
+        # 2. Cost (Inverse TER - lower TER = higher score)
         ter = df['estimated_ter'].fillna(df['estimated_ter'].median())
-        c_raw = 1.0 / (ter + 1e-9)
-        c_min, c_max = c_raw.min(), c_raw.max()
-        df['C'] = (c_raw - c_min) / (c_max - c_min + 1e-9) if c_max > c_min else 0.5
-
-        # Stability (T) - log(AUM)
+        inv_ter = 1.0 / (ter + 1e-9)
+        
+        # 3. Trust (Log of AUM)
         aum = df['aum_cr'].clip(lower=1.0)
-        t_raw = np.log(aum)
-        t_min, t_max = t_raw.min(), t_raw.max()
-        df['T'] = (t_raw - t_min) / (t_max - t_min + 1e-9) if t_max > t_min else 0.5
-
-        # Final Z_Score per spec: P=40%, C=30%, T=30%
-        df['Z_Score'] = 0.4 * df['P'] + 0.3 * df['C'] + 0.3 * df['T']
+        log_aum = np.log(aum)
+        
+        # Normalize WITHIN each Asset_Class using Z-Score
+        def _z_score_within_class(series: pd.Series, asset_class: str) -> pd.Series:
+            """Z-score normalize within asset class only."""
+            class_data = series[df['Asset_Class'] == asset_class]
+            mean = class_data.mean()
+            std = class_data.std()
+            if std == 0 or std < 1e-9:
+                return (series - mean) / (1e-9)  # Avoid division by zero
+            return (series - mean) / std
+        
+        # Calculate Z-scores per asset class
+        df['Sharpe_Z'] = df.groupby('Asset_Class', group_keys=False).apply(
+            lambda x: _z_score_within_class(sharpe.loc[x.index], x['Asset_Class'].iloc[0])
+        )
+        df['InvTER_Z'] = df.groupby('Asset_Class', group_keys=False).apply(
+            lambda x: _z_score_within_class(inv_ter.loc[x.index], x['Asset_Class'].iloc[0])
+        )
+        df['LogAUM_Z'] = df.groupby('Asset_Class', group_keys=False).apply(
+            lambda x: _z_score_within_class(log_aum.loc[x.index], x['Asset_Class'].iloc[0])
+        )
+        
+        # Combine into final score: 0.4×Sharpe + 0.4×InvTER + 0.2×LogAUM
+        df['Score'] = (0.4 * df['Sharpe_Z'] + 
+                       0.4 * df['InvTER_Z'] + 
+                       0.2 * df['LogAUM_Z'])
+        
+        # Normalize to [0, 100] for user readability
+        score_min = df['Score'].min()
+        score_max = df['Score'].max()
+        if score_max > score_min:
+            df['Score_Normalized'] = 100 * (df['Score'] - score_min) / (score_max - score_min)
+        else:
+            df['Score_Normalized'] = 50.0  # All equal
+        
         return df
     
     def vectorize_schemes(self) -> pd.DataFrame:
@@ -391,126 +526,121 @@ class RecommendationEngine:
 
         return score
 
-    def recommend_structured(self, profile: UserProfile, top_equity: int = 3, top_debt: int = 2,
-                             invest_amount: Optional[float] = None) -> Dict:
-        """Full Filter-Allocate-Rank pipeline producing structured buckets.
-
-        Returns a dict with allocation and top funds per bucket.
+    def recommend(self, profile: UserProfile, top_n: int = 5) -> List[Dict]:
         """
-        # Ensure classification exists
-        self._classify_funds()
-
-        # Vectorize schemes for scoring features
-        df_vec = self.vectorize_schemes()
-
-        # Apply hard filters
-        df_safe = self._hard_filter(profile, df_vec)
-
-        # Allocation percentages and amount
-        alloc = self._allocate(profile, total_amount=invest_amount)
-
-        # Score and rank
-        df_scored = self._score_and_rank(df_safe)
-
-        # Split by Asset_Class and pick top candidates using Z_Score
-        equity_candidates = df_scored[df_scored['Asset_Class'] == 'Equity'].nlargest(top_equity, 'Z_Score')
-        debt_candidates = df_scored[df_scored['Asset_Class'] == 'Debt'].nlargest(top_debt, 'Z_Score')
-        # Hybrid bucket (may be empty) - keep for completeness
-        hybrid_candidates = df_scored[df_scored['Asset_Class'] == 'Hybrid'].nlargest(0, 'Z_Score')
-
-        # Build output lists
-        def build_list(df_subset, score_col='Z_Score'):
-            out = []
-            for _, r in df_subset.iterrows():
-                out.append({
-                    'scheme_code': int(r['scheme_code']),
-                    'scheme_name': r['scheme_name'],
-                    'fund_house': r['fund_house'],
-                    'aum_cr': float(r['aum_cr']),
-                    'estimated_ter': float(r['estimated_ter']),
-                    'cagr_3y': float(r['cagr_3y']) if pd.notna(r['cagr_3y']) else None,
-                    'Z_Score': float(r[score_col])
-                })
-            return out
-
-        equity_list = build_list(equity_candidates)
-        debt_list = build_list(debt_candidates)
-        hybrid_list = build_list(hybrid_candidates)
-
-        # If no equity candidates remain after hard filters, override allocation per spec
-        if len(equity_list) == 0:
-            alloc['Equity'] = 0.0
-            alloc['Debt'] = 1.0
-
-        # If invest amount is provided, compute allocation amounts
-        total_amt = alloc.get('total_amount', profile.monthly_sip * 12.0)
-        equity_amt = total_amt * alloc['Equity']
-        debt_amt = total_amt * alloc['Debt']
-
-        result = {
-            'allocation': {
-                'Equity': {'percent': alloc['Equity'], 'amount': equity_amt, 'funds': equity_list},
-                'Debt': {'percent': alloc['Debt'], 'amount': debt_amt, 'funds': debt_list},
-                'Hybrid': {'funds': hybrid_list}
-            },
-            'summary': {
-                'total_amount': total_amt,
-                'equity_percent': alloc['Equity'],
-                'debt_percent': alloc['Debt']
-            }
-        }
-
-        return result
-
-    def recommend(self, profile: UserProfile, top_n: int = 10,
-                 min_aum_cr: float = 100.0) -> List[Dict]:
-        """Backward-compatible recommend(): flatten structured output into ranked list.
-
-        If the caller expects the new structured API, call `recommend_structured()` directly.
-        """
-        # Vectorize user profile for explanation generation
-        user_vec = self.vectorize_user(profile)
+        MAIN RECOMMENDATION PIPELINE
+        Implements complete Filter → Allocate → Rank → Select logic.
         
-        structured = self.recommend_structured(profile, top_equity=top_n, top_debt=0, invest_amount=profile.monthly_sip * 12)
-        # Flatten equity then debt
-        flattened = []
-        rank = 1
-        for bucket in ['Equity', 'Debt']:
-            for f in structured['allocation'].get(bucket, {}).get('funds', []):
-                flattened.append({
-                    'rank': rank,
-                    'scheme_code': f['scheme_code'],
-                    'scheme_name': f['scheme_name'],
-                    'fund_house': f['fund_house'],
-                    'aum_cr': f['aum_cr'],
-                    'estimated_ter': f['estimated_ter'],
-                    'cagr_3y': f['cagr_3y'],
-                    'match_score': round(f['Z_Score'] * 100, 2),
-                    'reason': f"Risk alignment score: {round(f['Z_Score'] * 100, 1)}%"
-                })
-                rank += 1
-
-        return flattened
+        Returns top N recommendations as ranked list with explanations.
+        """
+        print(f"\n{'='*70}")
+        print(f"🎯 RECOMMENDATION REQUEST: {profile.user_id}")
+        print(f"{'='*70}")
+        print(f"Profile: Age {profile.age}, Risk {profile.risk_tolerance}, "
+              f"Horizon {profile.investment_horizon}")
+        
+        # ===== STAGE 1: FILTER =====
+        df_filtered = self._hard_filter(profile)
+        if len(df_filtered) == 0:
+            print("[ERROR] No schemes match your constraints!")
+            return []
+        
+        # ===== STAGE 2: ALLOCATE =====
+        alloc = self._compute_allocation(profile)
+        print(f"\n💼 Target Allocation:")
+        print(f"   • Equity: {alloc['equity_pct']*100:.1f}%")
+        print(f"   • Debt: {alloc['debt_pct']*100:.1f}%")
+        
+        # ===== STAGE 3: SCORE (SEPARATE BY ASSET CLASS) =====
+        df_scored = self._score_funds_within_class(df_filtered)
+        
+        # ===== STAGE 4: SELECT TOP FUNDS =====
+        recommendations = []
+        
+        # Get Equity recommendations (if allocation allows)
+        if alloc['equity_pct'] > 0.01:
+            equity_funds = df_scored[df_scored['Asset_Class'] == 'Equity'].nlargest(3, 'Score')
+            print(f"\n[EQUITY] TOP EQUITY FUNDS ({len(equity_funds)} found):")
+            for i, (_, row) in enumerate(equity_funds.iterrows(), 1):
+                rec = {
+                    'rank': i,
+                    'asset_class': 'Equity',
+                    'scheme_code': int(row['scheme_code']),
+                    'scheme_name': row['scheme_name'],
+                    'fund_house': row['fund_house'],
+                    'scheme_category': row['scheme_category'],
+                    'plan': row.get('plan', 'N/A'),
+                    'nav': float(row.get('nav', 0)),
+                    'aum_cr': float(row['aum_cr']),
+                    'estimated_ter': float(row['estimated_ter']),
+                    'cagr_3y': float(row.get('cagr_3y', 0)) if pd.notna(row.get('cagr_3y')) else None,
+                    'score': round(row['Score_Normalized'], 1),
+                    'reason': self._explain_fund(row, profile)
+                }
+                recommendations.append(rec)
+                print(f"  {i}. {row['scheme_name'][:50]} (Score: {rec['score']})")
+        
+        # Get Debt recommendations
+        debt_count = 2 if alloc['equity_pct'] > 0.01 else 3  # If no equity, show more debt
+        debt_funds = df_scored[df_scored['Asset_Class'] == 'Debt'].nlargest(debt_count, 'Score')
+        print(f"\n📉 TOP DEBT FUNDS ({len(debt_funds)} found):")
+        for i, (_, row) in enumerate(debt_funds.iterrows(), 1):
+            rec = {
+                'rank': len(recommendations) + i,
+                'asset_class': 'Debt',
+                'scheme_code': int(row['scheme_code']),
+                'scheme_name': row['scheme_name'],
+                'fund_house': row['fund_house'],
+                'scheme_category': row['scheme_category'],
+                'plan': row.get('plan', 'N/A'),
+                'nav': float(row.get('nav', 0)),
+                'aum_cr': float(row['aum_cr']),
+                'estimated_ter': float(row['estimated_ter']),
+                'cagr_3y': float(row.get('cagr_3y', 0)) if pd.notna(row.get('cagr_3y')) else None,
+                'score': round(row['Score_Normalized'], 1),
+                'reason': self._explain_fund(row, profile)
+            }
+            recommendations.append(rec)
+            print(f"  {i}. {row['scheme_name'][:50]} (Score: {rec['score']})")
+        
+        print(f"\n[SUCCESS] Generated {len(recommendations)} recommendations")
+        print(f"{'='*70}\n")
+        
+        return recommendations[:top_n]
     
-    def _explain_match(self, user_vec: Dict[str, float], scheme_row: pd.Series) -> str:
-        """Generate human-readable explanation for why scheme was recommended"""
+    def _explain_fund(self, row: pd.Series, profile: UserProfile) -> str:
+        """Generate human-readable explanation for recommendation."""
         reasons = []
         
-        if scheme_row['amc_reputation_norm'] > 0:
-            reasons.append("Top 10 AMC")
+        # AUM stability
+        if row['aum_cr'] >= 1000:
+            reasons.append("Large AUM (stability)")
+        elif row['aum_cr'] >= 100:
+            reasons.append("Healthy AUM")
         
-        if scheme_row['direct_plan_norm'] > 0:
-            reasons.append("Direct Plan (lower fees)")
+        # Cost efficiency
+        ter = row['estimated_ter']
+        if ter < 0.5:
+            reasons.append("Low expense ratio")
+        elif ter < 1.0:
+            reasons.append("Reasonable costs")
         
-        if user_vec['risk_score'] < 0.3 and scheme_row['debt_score_norm'] > 0:
-            reasons.append("Low-risk profile match")
-        elif user_vec['risk_score'] > 0.6 and scheme_row['equity_score_norm'] > 0:
-            reasons.append("High-growth match")
-        
-        if scheme_row['return_score'] > 0.7:
+        # Performance
+        if row.get('cagr_3y', 0) and row['cagr_3y'] > 0.15:
             reasons.append("Strong 3Y returns")
         
-        if scheme_row['ter_score'] > 0.8:
-            reasons.append("Lower expense ratio")
+        # AMC quality
+        top_amcs = ['SBI', 'ICICI', 'HDFC', 'Nippon', 'Kotak', 'Aditya Birla', 'UTI', 'Axis', 'Mirae', 'DSP']
+        if any(amc in row['fund_house'] for amc in top_amcs):
+            reasons.append("Top-10 AMC")
         
-        return " • ".join(reasons) if reasons else "Good fundamental match"
+        # Direct plan benefit
+        if 'direct' in str(row.get('plan', '')).lower():
+            reasons.append("Direct Plan (lower fees)")
+        
+        return " • ".join(reasons) if reasons else "Strong fundamental match"
+
+
+# Backward compatibility alias
+RecommendationEngine = FundRecommender
+
