@@ -185,6 +185,190 @@ def test_edge_cases():
         return False
 
 
+def test_top_10_multiple_profiles():
+    """Test top 10 recommendations for 10+ diverse user profiles"""
+    print("\n" + "="*80)
+    print("TEST 5: Top 10 Recommendations for Multiple Profiles")
+    print("="*80)
+    
+    try:
+        engine = RecommendationEngine("data/mf_full_dataset_final.csv")
+        
+        # Define 12 diverse user profiles
+        profiles = [
+            UserProfile(
+                user_id="young_aggressive_001",
+                age=25,
+                annual_income="5L",
+                monthly_sip=3000,
+                risk_tolerance="Very High",
+                investment_horizon="10+yr",
+                investment_goals=["Wealth Growth"],
+                experience="Beginner"
+            ),
+            UserProfile(
+                user_id="professional_high_income_002",
+                age=32,
+                annual_income="50L+",
+                monthly_sip=25000,
+                risk_tolerance="High",
+                investment_horizon="10+yr",
+                investment_goals=["Wealth Growth", "Retirement"],
+                experience="Intermediate"
+            ),
+            UserProfile(
+                user_id="moderate_balanced_003",
+                age=40,
+                annual_income="25L",
+                monthly_sip=10000,
+                risk_tolerance="Moderate",
+                investment_horizon="5-10yr",
+                investment_goals=["Wealth Growth", "Emergency"],
+                experience="Intermediate"
+            ),
+            UserProfile(
+                user_id="parent_child_edu_004",
+                age=38,
+                annual_income="10L",
+                monthly_sip=5000,
+                risk_tolerance="Moderate",
+                investment_horizon="5-10yr",
+                investment_goals=["Child Edu", "Wealth Growth"],
+                experience="Beginner"
+            ),
+            UserProfile(
+                user_id="conservative_investor_005",
+                age=55,
+                annual_income="25L",
+                monthly_sip=8000,
+                risk_tolerance="Low",
+                investment_horizon="3-5yr",
+                investment_goals=["Emergency", "Retirement"],
+                experience="Intermediate"
+            ),
+            UserProfile(
+                user_id="pre_retiree_006",
+                age=58,
+                annual_income="50L+",
+                monthly_sip=15000,
+                risk_tolerance="Low",
+                investment_horizon="3-5yr",
+                investment_goals=["Retirement"],
+                experience="Expert"
+            ),
+            UserProfile(
+                user_id="beginner_low_income_007",
+                age=28,
+                annual_income="5L",
+                monthly_sip=1000,
+                risk_tolerance="Moderate",
+                investment_horizon="5-10yr",
+                investment_goals=["Wealth Growth"],
+                experience="Beginner"
+            ),
+            UserProfile(
+                user_id="expert_investor_008",
+                age=45,
+                annual_income="50L+",
+                monthly_sip=30000,
+                risk_tolerance="Very High",
+                investment_horizon="10+yr",
+                investment_goals=["Wealth Growth"],
+                experience="Expert"
+            ),
+            UserProfile(
+                user_id="emergency_fund_009",
+                age=35,
+                annual_income="10L",
+                monthly_sip=2000,
+                risk_tolerance="Low",
+                investment_horizon="1-3yr",
+                investment_goals=["Emergency"],
+                experience="Beginner"
+            ),
+            UserProfile(
+                user_id="retirement_focused_010",
+                age=50,
+                annual_income="25L",
+                monthly_sip=12000,
+                risk_tolerance="Moderate",
+                investment_horizon="5-10yr",
+                investment_goals=["Retirement", "Wealth Growth"],
+                experience="Intermediate"
+            ),
+            UserProfile(
+                user_id="long_term_growth_011",
+                age=22,
+                annual_income="5L",
+                monthly_sip=5000,
+                risk_tolerance="Very High",
+                investment_horizon="10+yr",
+                investment_goals=["Wealth Growth", "Retirement"],
+                experience="Intermediate"
+            ),
+            UserProfile(
+                user_id="balanced_senior_012",
+                age=62,
+                annual_income="10L",
+                monthly_sip=7000,
+                risk_tolerance="Moderate",
+                investment_horizon="3-5yr",
+                investment_goals=["Emergency", "Retirement"],
+                experience="Intermediate"
+            ),
+        ]
+        
+        # Get top 10 recommendations for each profile
+        results_summary = []
+        
+        for profile in profiles:
+            print(f"\n{'─'*80}")
+            print(f"👤 Profile: {profile.user_id}")
+            print(f"   Age: {profile.age} | Income: {profile.annual_income} | Monthly SIP: ₹{profile.monthly_sip:,}")
+            print(f"   Risk: {profile.risk_tolerance} | Horizon: {profile.investment_horizon} | Experience: {profile.experience}")
+            print(f"   Goals: {', '.join(profile.investment_goals)}")
+            print(f"{'─'*80}")
+            
+            recommendations = engine.recommend(profile, top_n=10)
+            
+            if len(recommendations) == 0:
+                print("   ⚠️  No suitable recommendations found (filters may be too restrictive)")
+                results_summary.append((profile.user_id, 0))
+                continue
+            
+            print(f"\n   📊 Top {len(recommendations)} Recommendations:\n")
+            
+            for rec in recommendations:
+                print(f"   #{rec['rank']:2d} | {rec['scheme_name'][:60]}")
+                print(f"       Fund House: {rec['fund_house']}")
+                print(f"       Match Score: {rec['match_score']}% | TER: {rec['estimated_ter']}%")
+                print(f"       3Y CAGR: {rec['cagr_3y']*100:.2f}% | AUM: ₹{rec['aum_cr']:,.0f}Cr")
+                print(f"       Reason: {rec['reason']}\n")
+            
+            results_summary.append((profile.user_id, len(recommendations)))
+        
+        # Print summary
+        print("\n" + "="*80)
+        print("SUMMARY: Recommendations Generated for All Profiles")
+        print("="*80)
+        
+        for profile_id, rec_count in results_summary:
+            status = "✅" if rec_count >= 10 else "⚠️ " if rec_count > 0 else "❌"
+            print(f"{status} {profile_id:30s} : {rec_count:2d} recommendations")
+        
+        total_profiles = len(profiles)
+        successful_profiles = sum(1 for _, count in results_summary if count > 0)
+        
+        print(f"\n✅ Generated recommendations for {successful_profiles}/{total_profiles} profiles")
+        return True
+    
+    except Exception as e:
+        print(f"❌ Test 5 failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     """Run all tests"""
     print("\n" + "="*80)
@@ -197,6 +381,7 @@ def main():
     results.append(("Single Recommendation", test_single_recommendation()))
     results.append(("Multiple Profiles", test_multiple_profiles()))
     results.append(("Edge Cases", test_edge_cases()))
+    results.append(("Top 10 Multiple Profiles", test_top_10_multiple_profiles()))
     
     # Summary
     print("\n" + "="*80)

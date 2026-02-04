@@ -468,6 +468,9 @@ class RecommendationEngine:
 
         If the caller expects the new structured API, call `recommend_structured()` directly.
         """
+        # Vectorize user profile for explanation generation
+        user_vec = self.vectorize_user(profile)
+        
         structured = self.recommend_structured(profile, top_equity=top_n, top_debt=0, invest_amount=profile.monthly_sip * 12)
         # Flatten equity then debt
         flattened = []
@@ -482,29 +485,12 @@ class RecommendationEngine:
                     'aum_cr': f['aum_cr'],
                     'estimated_ter': f['estimated_ter'],
                     'cagr_3y': f['cagr_3y'],
-                    'match_score': f['final_score']
+                    'match_score': round(f['Z_Score'] * 100, 2),
+                    'reason': f"Risk alignment score: {round(f['Z_Score'] * 100, 1)}%"
                 })
                 rank += 1
 
         return flattened
-        for idx, row in recommendations.iterrows():
-            results.append({
-                'rank': len(results) + 1,
-                'scheme_code': int(row['scheme_code']),
-                'scheme_name': row['scheme_name'],
-                'fund_house': row['fund_house'],
-                'scheme_category': row['scheme_category'],
-                'plan': row['plan'],
-                'nav': round(float(row['nav']), 2),
-                'aum_cr': round(float(row['aum_cr']), 0),
-                'estimated_ter': round(float(row['estimated_ter']), 3),
-                'cagr_3y': round(float(row['cagr_3y']), 3) if pd.notna(row['cagr_3y']) else None,
-                'cagr_5y': round(float(row['cagr_5y']), 3) if pd.notna(row['cagr_5y']) else None,
-                'match_score': round(float(row['match_score']), 3),
-                'reason': self._explain_match(user_vec, row)
-            })
-        
-        return results
     
     def _explain_match(self, user_vec: Dict[str, float], scheme_row: pd.Series) -> str:
         """Generate human-readable explanation for why scheme was recommended"""
